@@ -96,7 +96,6 @@ func (opts *State) Run(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	_, _ = os.Stdout.Write(data)
-
 	return nil
 }
 

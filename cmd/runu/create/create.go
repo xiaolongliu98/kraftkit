@@ -111,6 +111,7 @@ func (opts *Create) Run(cmd *cobra.Command, args []string) (retErr error) {
 	}()
 
 	rootDir := cmd.Flag(flagRoot).Value.String()
+	fmt.Println("[my log]rootDir: ", rootDir)
 	if rootDir == "" {
 		return fmt.Errorf("state directory (--%s flag) is not set", flagRoot)
 	}
@@ -129,10 +130,13 @@ func (opts *Create) Run(cmd *cobra.Command, args []string) (retErr error) {
 			return fmt.Errorf("getting pid file abs path: %w", err)
 		}
 	}
+	fmt.Println("[my log]pidFile: ", pidFile)
 
 	if err = os.Chdir(opts.Bundle); err != nil {
 		return fmt.Errorf("changing working dir to OCI bundle: %w", err)
 	}
+
+	fmt.Println("[my log]bundle: ", opts.Bundle)
 
 	spec, err := loadSpec()
 	if err != nil {
@@ -281,6 +285,7 @@ func genMachineArgs(ctx context.Context, cID, rootDir, bundleRoot string) (args 
 		return nil, fmt.Errorf("preparing machine executable: %w", err)
 	}
 
+	// 过滤掉类似-daemonize 和 -S 标志
 	args = sanitizeQemuArgs(exe.Args())
 
 	// HACK: restore previously overridden stateDir
@@ -434,7 +439,7 @@ func kernelArchitecture(path string) (string, error) {
 func supportedNamespaces(nss []rtspec.LinuxNamespace) []rtspec.LinuxNamespace {
 	knownNs := set.NewStringSet(specconv.KnownNamespaces()...)
 
-	filtered := nss[:0]
+	filtered := nss[:0] // equivalent to `make([]rtspec.LinuxNamespace, 0, len(nss))`
 	for _, ns := range nss {
 		if knownNs.Contains(string(ns.Type)) {
 			filtered = append(filtered, ns)

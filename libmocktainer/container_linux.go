@@ -181,6 +181,8 @@ func (c *Container) start(process *Process) (retErr error) {
 	logsDone := parent.forwardChildLogs()
 	if logsDone != nil {
 		defer func() {
+			// [Receive] logsDone is closed when the log forwarder exits.
+
 			// Wait for log forwarder to finish. This depends on
 			// runc init closing the _LIBCONTAINER_LOGPIPE log fd.
 			err := <-logsDone
@@ -237,6 +239,45 @@ func (c *Container) Signal(s os.Signal) error {
 	return nil
 }
 
+/*
+*
+这段 Go 语言代码定义了一个函数 `createExecFifo`，它是一个容器实例 `c *Container` 的方法。
+FIFO（First In First Out），也称为命名管道，是 UNIX 系统 IPC（Inter-Process Communication，进程间通信）
+的一种方式，允许进程间通过读写文件的方式进行通信。下面是代码的逐行解释：
+ 1. `func (c *Container) createExecFifo() error {`
+    这行定义了 `Container` 类型的一个方法 `createExecFifo`，这个方法没有参数，并返回一个 `error` 类型的值，用于指示是否有错误发生。
+ 2. `rootuid := 0`
+    `rootgid := 0`
+    这两行定义了变量 `rootuid` 和 `rootgid`，并将它们都初始化为 0，代表 root 用户的 UID 和 GID。在 UNIX 系统中，0
+    通常是超级用户 root 的 UID 和 GID。
+ 3. `fifoName := filepath.Join(c.root, execFifoFilename)`
+    使用 `filepath.Join` 函数构造 FIFO 文件的路径名。这个路径由容器的根目录 `c.root` 和
+
+`execFifoFilename`（在代码中没有给出，但它应该是一个常量或者在别处定义的变量）组成。
+ 4. `if _, err := os.Stat(fifoName); err == nil {`
+    `    return fmt.Errorf("exec fifo %s already exists", fifoName)`
+    `}`
+    使用 `os.Stat` 函数检查名为 `fifoName` 的文件是否存在。
+
+如果没有错误（即文件存在），则返回一个错误信息，说明该 FIFO 已经存在。
+ 5. `oldMask := unix.Umask(0o000)`
+    通过调用 `unix.Umask` 函数设置当前的 umask 值为 0（即不屏蔽任何权限），并保存旧的 umask 值到变量 `oldMask` 中。
+ 6. `if err := unix.Mkfifo(fifoName, 0o622); err != nil {`
+    `    unix.Umask(oldMask)`
+    `    return err`
+    `}`
+    使用 `unix.Mkfifo` 函数创建名为 `fifoName` 的 FIFO 文件，文件权限设置为 `0622`（所有者可读写，组和其他用户可写）。
+
+如果创建失败，恢复之前保存的 umask 值，并返回错误。
+ 7. `unix.Umask(oldMask)`
+    不管 FIFO 创建过程是否成功，都会恢复原来的 umask 值。
+ 8. `return os.Chown(fifoName, rootuid, rootgid)`
+    最后一行使用 `os.Chown` 函数更改 FIFO 文件的拥有者到 root 用户和组（UID 0 和 GID 0）。
+
+如果更改拥有者成功，函数返回 `nil`，否则返回错误。
+整体来看，这个函数的作用是在容器的根目录中创建一个新的 FIFO 文件，并确保这个文件的权限和拥有者设置正确。
+如果在创建过程中遇到任何错误，函数将返回错误信息。这种 FIFO 文件通常用于容器内部进程与宿主机或其他容器进程之间的通信。
+*/
 func (c *Container) createExecFifo() error {
 	rootuid := 0
 	rootgid := 0
@@ -245,6 +286,8 @@ func (c *Container) createExecFifo() error {
 	if _, err := os.Stat(fifoName); err == nil {
 		return fmt.Errorf("exec fifo %s already exists", fifoName)
 	}
+	// 在 UNIX 系统中，umask（用户文件创建掩码）是一个进程级别的设置，它决定了新创建文件和目录的默认权限。
+	// umask 值实际上指定了在文件和目录的权限位上要屏蔽（设置为“不允许”）的位。
 	oldMask := unix.Umask(0o000)
 	if err := unix.Mkfifo(fifoName, 0o622); err != nil {
 		unix.Umask(oldMask)
@@ -277,6 +320,25 @@ func (c *Container) includeExecFifo(cmd *exec.Cmd) error {
 	return nil
 }
 
+/*
+*
+在 runc 中，newParentProcess 方法是用来创建一个新的父进程的。父进程的任务是启动并监控容器内的初始进程（通常被称为 "init" 进程）。
+下面是该方法的详细解释：
+
+utils.NewSockPair("init") 创建了一个 socket 对，这对 socket 用于在父进程和容器内的初始进程之间建立一个双向通信机制。
+父进程将保留 parentInitPipe 端点，而 childInitPipe 端点会被传递给容器的初始进程。
+
+os.Pipe() 创建了一个管道对，这对管道用于日志的传输。父进程使用 parentLogPipe 来读取容器的初始进程写入 childLogPipe 的日志。
+
+c.commandTemplate(...) 创建了初始进程的命令模板，这是一个 exec.Cmd 实例，其中包含了如何启动容器内的初始进程的详细信息。
+
+c.includeExecFifo(cmd) 在命令中包含了一个 exec fifo 的设置，这是一个命名管道（FIFO），用于控制容器中进程的执行。
+
+c.newInitProcess(...) 实际上创建了 initProcess 的一个实例，它封装了上述所有的细节，包括命令、管道对以及其他需要启动和管理初始进程的配置。
+
+整个过程旨在准备所有必需的组件和配置，以便父进程可以启动并监视容器内的初始进程，这是容器正常运行所必需的。
+这种设计允许 runc 对容器内的进程执行生命周期管理，比如启动、监控、以及在必要时终止进程。
+*/
 func (c *Container) newParentProcess(p *Process) (parentProcess, error) {
 	parentInitPipe, childInitPipe, err := utils.NewSockPair("init")
 	if err != nil {
@@ -576,9 +638,25 @@ type netlinkError struct{ error }
 // init process correctly, i.e. with correct namespaces, uid/gid
 // mapping etc.
 func (c *Container) bootstrapData(cloneFlags uintptr, nsMaps map[configs.NamespaceType]string, _ initType) (_ io.Reader, Err error) {
+	/**
+	这段代码定义了 `bootstrapData` 方法，它是 `runc` 项目中 `Container` 类型的一个成员函数。
+	该函数的目的是生成用于设置容器初始进程的启动环境的数据，并将其编码为可以通过 netlink 传输的二进制格式。
+	具体来说，这个数据会包括容器需要加入的各种 Linux 名称空间、用户和组 ID 映射等信息。
+	以下是代码的逐行解释：
+
+	bootstrapData它接收三个参数：
+	- `cloneFlags`: 一个无符号整数，代表要传递给 `clone` 系统调用的标志，这些标志定义了新进程（容器的 init 进程）将被创建时的行为，比如应该在哪些名称空间中创建它。
+	- `nsMaps`: 一个映射，键是 `NamespaceType`（表示不同类型的名称空间，如 PID、网络等），值是表示特定名称空间路径的字符串。
+	- `_ initType`: 这里的下划线 (`_`) 表明这个参数没有被使用。`initType` 可能用于区分不同类型的初始化过程。
+	*/
+
+	// 这里创建了一个新的 netlink 消息请求。`InitMsg` 似乎是一个自定义的 netlink 消息类型，`0` 是消息的标志位。
 	// create the netlink message
 	r := nl.NewNetlinkRequest(int(InitMsg), 0)
 
+	// 这段 `defer` 代码用于异常恢复。在 Go 中，`panic` 可用于异常处理流程。
+	//如果在添加数据到 netlink 消息时出现 `panic`，这段代码会捕捉到 `panic` 并将其转换为一个错误，
+	//这样函数就可以将这个错误正常返回给调用者，而不是导致整个程序崩溃。
 	// Our custom messages cannot bubble up an error using returns, instead
 	// they will panic with the specific error type, netlinkError. In that
 	// case, recover from the panic and return that as an error.
@@ -592,12 +670,15 @@ func (c *Container) bootstrapData(cloneFlags uintptr, nsMaps map[configs.Namespa
 		}
 	}()
 
+	// 这一行添加一个 `Int32msg` 类型的数据到 netlink 消息中，这个数据包含了 `clone` 系统调用的标志位。
 	// write cloneFlags
 	r.AddData(&Int32msg{
 		Type:  CloneFlagsAttr,
 		Value: uint32(cloneFlags),
 	})
 
+	// 如果有自定义的名称空间路径需要添加，该代码首先排序这些路径（可能是为了确保它们在消息中的顺序符合某种预定的逻辑），
+	//然后创建一个 `Bytemsg` 类型的数据添加到 netlink 消息中，这个数据包含了所有名称空间路径，用逗号分隔转换成一个字节串。
 	// write custom namespace paths
 	if len(nsMaps) > 0 {
 		nsPaths, err := c.orderNamespacePaths(nsMaps)
@@ -610,6 +691,9 @@ func (c *Container) bootstrapData(cloneFlags uintptr, nsMaps map[configs.Namespa
 		})
 	}
 
+	// 最后，`r.Serialize()` 将 netlink 消息序列化为字节串，然后使用这个字节串创建一个 `io.Reader`，
+	//这样消费者就可以读取这个数据流并将其写入到一个引导程序（可能是 `nsenter` 工具），
+	//以便正确地初始化容器的 init 进程，包括加入正确的名称空间、设置正确的用户/组 ID 映射等。
 	return bytes.NewReader(r.Serialize()), nil
 }
 

@@ -123,6 +123,7 @@ func (p *initProcess) start() (retErr error) {
 	waitInit := initWaiter(p.messageSockPair.parent)
 	defer func() {
 		if retErr != nil {
+			// [Receive] error from the child
 			werr := <-waitInit
 			if werr != nil {
 				logrus.WithError(werr).Warn()
@@ -135,14 +136,17 @@ func (p *initProcess) start() (retErr error) {
 		}
 	}()
 
+	// [Send] bootstrap data to the child, bootstrapData contains namespaces config
 	if _, err := io.Copy(p.messageSockPair.parent, p.bootstrapData); err != nil {
 		return fmt.Errorf("can't copy bootstrap data to pipe: %w", err)
 	}
+	// [Receive] error from the child
 	err = <-waitInit
 	if err != nil {
 		return err
 	}
 
+	// [Receive] final child's PID from the child
 	childPid, err := p.getChildPid()
 	if err != nil {
 		return fmt.Errorf("can't get final child's PID from pipe: %w", err)
@@ -157,6 +161,7 @@ func (p *initProcess) start() (retErr error) {
 	}
 	p.setExternalDescriptors(fds)
 
+	// [Receive] wait for the child's runc-init1:stage to exit
 	// Wait for our first child to exit
 	if err := p.waitForChildExit(childPid); err != nil {
 		return fmt.Errorf("error waiting for our first child to exit: %w", err)
@@ -168,11 +173,16 @@ func (p *initProcess) start() (retErr error) {
 	if err := p.updateSpecState(); err != nil {
 		return fmt.Errorf("error updating spec state: %w", err)
 	}
+
+	// [Send] 在这里发送了initConfig到了runc-init2:stage，里面包含了args启动参数
 	if err := p.sendConfig(); err != nil {
 		return fmt.Errorf("error sending config to init process: %w", err)
 	}
 
 	var seenProcReady bool
+
+	// [Blocked]
+	// [Receive] procReady from the child
 	ierr := parseSync(p.messageSockPair.parent, func(sync *syncT) error {
 		switch sync.Type {
 		case procReady:
@@ -193,16 +203,25 @@ func (p *initProcess) start() (retErr error) {
 			// In order to cleanup the runc-init[2:stage] by
 			// runc-delete/stop, we should store the status before
 			// procRun sync.
+
+			// 注意：如果procRun状态已经同步，并且出于某种原因runc-create进程被杀死，
+			// 那么runc-init[2:stage]进程将会出现泄漏。同时，
+			// runc命令也会因为容器缺少state.json而无法解析根目录。
+
+			// 为了能够通过runc-delete/stop命令清理runc-init[2:stage]，
+			// 我们应该在procRun同步之前存储状态。
 			state, uerr := p.container.updateState(p)
 			if uerr != nil {
 				return fmt.Errorf("unable to store init state: %w", uerr)
 			}
 			p.container.initProcessStartTime = state.InitProcessStartTime
 
+			// [Send] procRun to the child
 			// Sync with child.
 			if err := writeSync(p.messageSockPair.parent, procRun); err != nil {
 				return err
 			}
+
 		case procHooks:
 			if len(p.config.Config.Hooks) != 0 {
 				s, err := p.container.currentOCIState()
@@ -221,6 +240,7 @@ func (p *initProcess) start() (retErr error) {
 					return err
 				}
 			}
+			// [Send] procHooksDone to the child
 			// Sync with child.
 			if err := writeSync(p.messageSockPair.parent, procResume); err != nil {
 				return err
@@ -231,6 +251,7 @@ func (p *initProcess) start() (retErr error) {
 		return nil
 	})
 
+	// [Send] shutdown to the child
 	if err := unix.Shutdown(int(p.messageSockPair.parent.Fd()), unix.SHUT_WR); err != nil && ierr == nil {
 		return &os.PathError{Op: "shutdown", Path: "(init pipe)", Err: err}
 	}
@@ -314,7 +335,16 @@ func (p *initProcess) forwardChildLogs() chan error {
 	return logs.ForwardLogs(p.logFilePair.parent)
 }
 
+/*
+*
+这个 getPipeFds 函数的目的是获取一个进程的前三个文件描述符（通常是标准输入、标准输出和标准错误）的路径。
+在 Linux 系统中，进程的文件描述符（FDs）可以通过 /proc/[pid]/fd 目录来访问。
+这段代码假设文件描述符 0、1 和 2 分别对应于标准输入、输出和错误。
+
+函数接受一个进程ID（pid），并返回一个字符串切片，其中包含前三个文件描述符的目标路径。
+*/
 func getPipeFds(pid int) ([]string, error) {
+
 	fds := make([]string, 3)
 
 	dirPath := filepath.Join("/proc", strconv.Itoa(pid), "/fd")

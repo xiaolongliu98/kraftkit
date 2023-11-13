@@ -97,6 +97,7 @@ func startInitialization() (retErr error) {
 		// If this defer is ever called, this means initialization has failed.
 		// Send the error back to the parent process in the form of an initError.
 		ierr := initError{Message: retErr.Error()}
+		// [Send] the error back to the parent.
 		if err := writeSyncArg(pipe, procError, ierr); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return
@@ -156,6 +157,7 @@ func startInitialization() (retErr error) {
 
 func containerInit(t initType, pipe *os.File, _ *os.File, fifoFd, logFd int, _ mountFds) error {
 	var config *initConfig
+	// [Receive] the config from the parent using the pipe.
 	if err := json.NewDecoder(pipe).Decode(&config); err != nil {
 		return err
 	}
